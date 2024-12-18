@@ -5,6 +5,8 @@ import stim
 import pymatching
 from color_code_stim import *
 from scipy.sparse import csc_matrix
+import sinter
+from numba import jit
 
 # =============================================================================
 # D=5
@@ -25,17 +27,20 @@ from scipy.sparse import csc_matrix
 # =============================================================================
 
 circuit = stim.Circuit.generated("surface_code:rotated_memory_x", 
-                                 distance=3, 
-                                 rounds=3, 
-                                 after_clifford_depolarization=0.005)
+                                 distance=5, 
+                                 rounds=4, 
+                                 after_clifford_depolarization=0.009)
 
 model = circuit.detector_error_model(decompose_errors=True)
 #matching = pymatching.Matching.from_detector_error_model(model)
 
 sampler = circuit.compile_detector_sampler()
 #syndrome, actual_observables = sampler.sample(shots=1000, separate_observables=True)
-syndrome = np.array([[False, False, False, False, False, False, False, False, False,False, False, False, False, False, False,  True, False, False,
-       False, False, False, False, False, False]])
+syndrome, obs = sampler.sample(shots=10000, separate_observables=True)
+# =============================================================================
+# syndrome = np.array([[False, False, False, False, False, False, False, False, False,False, False, False, False, False, False,  True, False, False,
+#        False, False, False, False, False, False]])
+# =============================================================================
 
 T = 30
 
@@ -107,30 +112,19 @@ def BP(DEM, syndrome, T):
             break
     
     dem = stim.DetectorErrorModel()
-    #print(L1)
-    
-    for i in range(DEM.num_errors):
-        detectors = DEM[i].targets_copy()
-        deminstruction = stim.DemInstruction(DEM[i].type, DEM[i].args_copy(), detectors)
-        dem.append(deminstruction)
-        
-    for i in range(DEM.num_detectors):
-        detectors = DEM[DEM.num_errors + i].targets_copy()
-        #print(detectors)
-        deminstruction = stim.DemInstruction(DEM[DEM.num_errors + i].type, DEM[DEM.num_errors + i].args_copy(), detectors)
-        dem.append(deminstruction)
     
     for i in range(len(DEM)):
         detectors = DEM[i].targets_copy()
         if i < DEM.num_errors:
             v = Z1[i]
-            v1 = 1/(1+np.e**v)
+            v1 = 1/(1+np.exp(v))
             deminstruction = stim.DemInstruction(DEM[i].type, [v1], detectors)
         else:
             deminstruction = stim.DemInstruction(DEM[i].type, DEM[i].args_copy(), detectors)
         dem.append(deminstruction)
     
     return x, dem, Z1, H, Z, L, L1
+
         
 def Lmn(M, N, m, n, Z, E):     
     lmn = 1
@@ -165,17 +159,41 @@ def F(x):
 def G(x):
     return 1/(1+np.e**x)
 
+
+N = 0
 for i in range(len(syndrome)):
     x, dem, Z1, H, Z, L, L1 = BP(model, syndrome[i], T)
-    if np.any(x):
-# =============================================================================
-#         print(model)
-#         print(dem)
-#         print(Z1)
-# =============================================================================
+
+    if np.all(np.dot(H, x)%2 == syndrome[i]%2):
+        #print(i)
+        n = 0
+        for xi in x:
+            deminstruction = dem[xi]
+            targets = deminstruction.targets_copy()
+            for target in targets:
+                if target.is_logical_observable_id():
+                    n += 1
+                    break
+        n %= 2
+        N += (n + obs[i][0])%2
+    else:
         print(i)
         
-        matching1 = pymatching.Matching.from_detector_error_model(dem)
+        matching = pymatching.Matching.from_detector_error_model(dem)
+        preds_dem = matching.decode_batch(np.array([syndrome[i]]))
+        
+        preds_obs_new = preds_dem[:, 0].flatten()
+        
+        preds_obs = preds_obs_new.astype('bool')
+        
+        N += sum(np.logical_xor(obs[i], preds_obs))
+        
+        if dem == model:
+            break
+        
+    #fails = np.logical_xor(obs, preds_obs)
+            
+print(N/len(syndrome))
         
 class BipartiteGraphBP:
     def __init__(self, num_vars, num_checks, edges, prior_llrs, syndrome, H):
@@ -342,6 +360,8 @@ if __name__ == '__main__':
          (13,2):11,(13,3):11,(13,4):11,(13,5):11,
          (14,4):11,(14,5):11}#Znm
     Z1 = {0:0,1:0,2:0,3:0,4:0,5:0,6:0,7:0,8:0,9:0,10:0,11:0,12:0,13:0,14:0}#Zn
+    
+    
 # =============================================================================
 #     s = np.array([0,1])
 #     x = np.array([0 for i in range(3)])
@@ -390,11 +410,8 @@ if __name__ == '__main__':
         
         
         if np.all(np.dot(H, x)%2 == s%2) or t == T:
-# =============================================================================
-#             print(t)
-#             print(x)
-# =============================================================================
             break
+
         
     # 示例使用
     # =============================================================================
@@ -418,33 +435,47 @@ if __name__ == '__main__':
     # prior_llrs = [6.2,11,11,11,11,11,6.2,11,11,11,11,6.2,11,11,11]  # 变量节点的先验 LLR
     # syndrome = np.array([1,1,0,1,0,1])
     # =============================================================================
-    num_vars = 2
-    num_checks = 3
-    edges = [(0,0),(0,1),
-         (1,1),(1,2)
-         ]
-    prior_llrs = [np.log(9), np.log(9)]  # 变量节点的先验 LLR
-    syndrome = np.array([0,1,1])
-
-    H = np.array([[0 for i in range(num_vars)] for j in range(num_checks)])
-
-    for i in range(num_checks):
-        for j in range(num_vars):
-            if (j,i) in edges:
-                H[i][j] = 1
-
-
-    bp = BipartiteGraphBP(num_vars, num_checks, edges, prior_llrs, syndrome, H)
-    bp.run()
-
-    # 输出变量节点的边缘概率
-    probabilities = bp.marginal_probabilities()
-    for i, (p0, p1) in enumerate(probabilities):
-        print(f"变量节点 {i} 的边缘概率: P(0)={p0:.20f}, P(1)={p1:.20f}")
-    print(probabilities)
+# =============================================================================
+#     num_vars = 2
+#     num_checks = 3
+#     edges = [(0,0),(0,1),
+#          (1,1),(1,2)
+#          ]
+#     prior_llrs = [np.log(9), np.log(9)]  # 变量节点的先验 LLR
+#     syndrome = np.array([0,1,1])
+# 
+#     H = np.array([[0 for i in range(num_vars)] for j in range(num_checks)])
+# 
+#     for i in range(num_checks):
+#         for j in range(num_vars):
+#             if (j,i) in edges:
+#                 H[i][j] = 1
+# 
+# 
+#     bp = BipartiteGraphBP(num_vars, num_checks, edges, prior_llrs, syndrome, H)
+#     bp.run()
+# 
+#     # 输出变量节点的边缘概率
+#     probabilities = bp.marginal_probabilities()
+#     for i, (p0, p1) in enumerate(probabilities):
+#         print(f"变量节点 {i} 的边缘概率: P(0)={p0:.20f}, P(1)={p1:.20f}")
+#     print(probabilities)
+# =============================================================================
 
     # =============================================================================
     # for (p0,p1) in probabilities:
     #     outcome = np.log(p0/p1)
     #     print(outcome)
     # =============================================================================
+
+# =============================================================================
+#     for i in range(DEM.num_errors):
+#         detectors = DEM[i].targets_copy()
+#         deminstruction = stim.DemInstruction(DEM[i].type, DEM[i].args_copy(), detectors)
+#         dem.append(deminstruction)
+#         
+#     for i in range(DEM.num_detectors):
+#         detectors = DEM[DEM.num_errors + i].targets_copy()
+#         deminstruction = stim.DemInstruction(DEM[DEM.num_errors + i].type, DEM[DEM.num_errors + i].args_copy(), detectors)
+#         dem.append(deminstruction)
+# =============================================================================
